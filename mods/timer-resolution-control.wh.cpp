@@ -60,7 +60,7 @@ Authors: m417z, levitation
       - limit: Limit changing the timer resolution
     - Limit: 10
       $name: Program timer resolution limit (for the limit configuration)
-  - - Name: C:\Users\Roland\AppData\Roaming\Zoom\bin\Zoom.exe
+  - - Name: \AppData\Roaming\Zoom\bin\Zoom.exe
       $name: Program name or path
     - Comment: ...
       $name: Comment
