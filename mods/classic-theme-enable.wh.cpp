@@ -233,7 +233,7 @@ retry:  //If Windhawk loads the mod too early then the classic theme initialisat
         RestoreTimerResolution();
         return FALSE;   //a service session?
     }
-    else {      //This winlogon.exe is associated with a non-console session that is not active yet. In this case we need to retry later, else the RDP connection will fail.
+    else {      //If Windhawk loads the mod too early then the classic theme initialisation will fail. Therefore we need to loop until the initialisation succeeds. Also if the mod is loaded into a RDP session too early then for some reason that would block the RDP session from successfully connecting. So we need to wait for session "active" state in case of RDP sessions. This is another reason for having a loop here.
         goto retry;
     }
 }
@@ -250,7 +250,7 @@ BOOL Wh_ModInit() {
     else if (abort) {
         return FALSE;   //a service session?
     }
-    else {      //This winlogon.exe is associated with a non-console session that is not active yet. In this case we need to retry later, else the RDP connection will fail.
+    else {      //If Windhawk loads the mod too early then the classic theme initialisation will fail. Therefore we need to loop until the initialisation succeeds. Also if the mod is loaded into a RDP session too early then for some reason that would block the RDP session from successfully connecting. So we need to wait for session "active" state in case of RDP sessions. This is another reason for creating a separate thread with a loop.
 
         HMODULE hNtdll = GetModuleHandle(L"ntdll.dll");
         if (!hNtdll) {
