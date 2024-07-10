@@ -97,21 +97,14 @@ ULONG g_originalTimerResolution;
 typedef NTSTATUS(WINAPI* NtSetTimerResolution_t)(ULONG, BOOLEAN, PULONG);
 NtSetTimerResolution_t pOriginalNtSetTimerResolution;
 
+//this hook is needed to restore the resolution winlogon would have had if this mod would not have been installed
 NTSTATUS WINAPI NtSetTimerResolutionHook(ULONG DesiredResolution, BOOLEAN SetResolution, PULONG CurrentResolution)
 {
     if (!SetResolution) {
-        //Wh_Log(L"< SetResolution is FALSE");
         return pOriginalNtSetTimerResolution(DesiredResolution, SetResolution, CurrentResolution);
     }
 
-    //Wh_Log(L"> DesiredResolution: %f milliseconds", (double)DesiredResolution / 10000.0);
-
     g_originalTimerResolution = DesiredResolution;
-
-    if (DesiredResolution > g_maximumResolution) {
-        //Wh_Log(L"* Overriding resolution: %f milliseconds", (double)limitResolution / 10000.0);
-        DesiredResolution = g_maximumResolution;
-    }
 
     return pOriginalNtSetTimerResolution(DesiredResolution, SetResolution, CurrentResolution);
 }
