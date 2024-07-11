@@ -1,6 +1,6 @@
 // ==WindhawkMod==
 // @id              edge-window-tab-manager-block
-// @name            Prevent Edge from lagging your Taskbar process
+// @name            Prevent Edge from lagging the Taskbar process
 // @description     Blocks Edge window Alt-Tab manager
 // @version         1.0
 // @author          Roland Pihlakas
@@ -27,7 +27,7 @@
 
 This mod is for tab hoarders using Edge browser. 
 
-When you set Alt-Tab to show open windows only (and not individual tabs), it should turn off a problematic feature in the Taskbar process. However, in reality, when you have many tabs open in Edge, the existence of this "Alt-Tab showing browser tabs" feature in Windows still causes issues - the Taskbar will lag and start to consume lot of CPU. This regardless whether the browser tabs are shown in Alt-Tab. There was an experimental Edge flag `#edge-window-tab-manager` that you could set to "off" in order to disable the problematic feature. However, the flag has been removed. This mod solves the issue in a different way.
+When you set Alt-Tab to show open windows only (and not individual tabs), it should turn off a problematic feature in the Taskbar process. However, in reality, when you have many tabs open in Edge, the existence of this "Alt-Tab showing browser tabs" feature in Windows still causes issues - the Taskbar will lag and starts to consume lot of CPU. This is regardless whether the browser tabs are shown in Alt-Tab. There was an experimental Edge flag `#edge-window-tab-manager` that you could set to "off" in order to disable the problematic feature. However, the flag has been removed. This mod solves the issue in a different way.
 
 
 ## Installation
@@ -59,7 +59,7 @@ As a problem-free alternative, I recommend Brave browser. It has same vertical t
 See also the following Reddit post:
 [Having too many (1,000+) Microsoft Edge tabs open can break File Explorer in Windows 10](https://www.reddit.com/r/edge/comments/1090h93/having_too_many_1000_microsoft_edge_tabs_open_can/).
 
-This mod is built as a variation of the code of a loader program developed by gexgd0419:
+This mod is built as a variation of the code of a loader program developed by `gexgd0419`:
 [EdgeWindowTabManagerBlock: A program that blocks the WindowTabManager feature of Microsoft Edge](https://github.com/gexgd0419/EdgeWindowTabManagerBlock).
 
 The benefit of this small mod is that you can conveniently install or uninstall the fix directly via Windhawk UI with fewer steps and less attention to technical details.
