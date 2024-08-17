@@ -504,6 +504,9 @@ HDC WINAPI BeginPaintHook(
 ) {
     HDC hdc = pOriginalBeginPaint(hWnd, lpPaint);
 
+    int originalError = GetLastError();
+
+
     if (hdc != lpPaint->hdc)
         Wh_Log(L"hdc != lpPaint->hdc");
 
@@ -569,6 +572,8 @@ HDC WINAPI BeginPaintHook(
         }
     }
     
+
+    SetLastError(originalError);    //reset the error code so that the hooked API does not appear to have errored in case any helper code above caused an error code to be set
     return hdc;
 }
 
@@ -597,6 +602,9 @@ BOOL WINAPI EndPaintHook(
 
         if (found) {
 
+            int originalError = GetLastError();
+
+
             if (!GetSysColorBrush(memDCInfo.colorIndex)) {        //Verify that the brush is supported by the current system. GetSysColor() does not have return value, so need to use GetSysColorBrush() for verification purposes.
                 Wh_Log(L"GetSysColorBrush failed - is the colour supported by current OS?");
             }
@@ -621,6 +629,9 @@ BOOL WINAPI EndPaintHook(
             DeleteObject(memDCInfo.memBitmap);
 
             DeleteDC(memDC);
+
+
+            SetLastError(originalError);    //Reset the error code so that the hooked API does not appear to have errored in case any helper code above caused an error code to be set. Some Windows API-s do not reset error code in case of success, so lets ensure that we enter the hooked API with original error code.
 
             //pass original HDC to original EndPaint
             PAINTSTRUCT paintStruct = *lpPaint;
@@ -647,6 +658,8 @@ BOOL WINAPI DrawFrameControlHook(
         && lprc
         //cannot use WindowFromDC and WindowNeedsBackgroundRepaint check here since WindowFromDC will fail for some reason
     ) {
+        int originalError = GetLastError();
+
          
         RECT hdcRect;
         if (!GetClipBox(hdc, &hdcRect)) {
@@ -710,6 +723,9 @@ BOOL WINAPI DrawFrameControlHook(
                 FillRect(hdc, &fillRect, brush);
             }
         }
+
+
+        SetLastError(originalError);    //Reset the error code so that the hooked API does not appear to have errored in case any helper code above caused an error code to be set. Some Windows API-s do not reset error code in case of success, so lets ensure that we enter the hooked API with original error code.
     }
 
     return pOriginalDrawFrameControl(
@@ -722,6 +738,9 @@ BOOL WINAPI DrawFrameControlHook(
 
 //this hook currently fixes regions near tray area
 bool DrawThemeParentBackgroundInternal(HWND hwnd, HDC hdc) {
+
+    int originalError = GetLastError();
+
 
     RECT rect;
     if (!GetClipBox(hdc, &rect)) {
@@ -741,6 +760,8 @@ bool DrawThemeParentBackgroundInternal(HWND hwnd, HDC hdc) {
             }
             else {
                 FillRect(hdc, &rect, brush);
+
+                SetLastError(originalError);    //reset the error code so that the hooked API does not appear to have errored in case any helper code above caused an error code to be set
                 return true;
             }
         }
@@ -751,11 +772,15 @@ bool DrawThemeParentBackgroundInternal(HWND hwnd, HDC hdc) {
             }
             else {
                 FillRect(hdc, &rect, brush);
+
+                SetLastError(originalError);    //reset the error code so that the hooked API does not appear to have errored in case any helper code above caused an error code to be set
                 return true;
             }
         }
     }
 
+
+    SetLastError(originalError);    //Reset the error code so that the hooked API does not appear to have errored in case any helper code above caused an error code to be set. Some Windows API-s do not reset error code in case of success, so lets ensure that we enter the hooked API with original error code.
     return false;
 }
 
