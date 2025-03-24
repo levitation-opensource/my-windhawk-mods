@@ -57,12 +57,6 @@ Note that when you enable nested `mstsc.exe` process auto-termination, then this
 #include <windowsx.h>
 #include <wtsapi32.h>
 
-
-#ifndef WH_MOD
-#define WH_MOD
-#include <mods_api.h>
-#endif
-
 #pragma endregion Includes
 
 
