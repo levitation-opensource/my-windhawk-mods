@@ -6,7 +6,7 @@
 // @author          Roland Pihlakas
 // @github          https://github.com/levitation
 // @homepage        https://www.simplify.ee/
-// @compilerOptions -lkernel32 -lwtsapi32
+// @compilerOptions -lkernel32 -lwtsapi32 -ladvapi32
 // @include         winlogon.exe
 // @include         rdpclip.exe
 // @include         mstsc.exe
@@ -21,7 +21,11 @@
 
 RDP users sometimes encounter issues with an endless "Please Wait" message during RDP reconnection. This problem is caused by server-side `rdpclip.exe` blocking the reconnection for some reason.
 
-The current mod prevents `rdpclip.exe` from blocking the RDP reconnect. 
+The current mod prevents `rdpclip.exe` from blocking the RDP reconnect indefinitely.
+
+Note that with this mod, **after RDP disconnection, there will be a time interval during which RDP service is not available**. This is because the RDP service is being automatically restarted by the mod. This means you might not be able to reconnect **immediately**, but only after some time has passed, depending on your computer - in my machines, **it takes about a minute**. But that time interval until reconnection becomes possible is not infinite, as it is with the original problem the mod is fixing. That is a tradeoff of using this mod. 
+
+_If you consider it important to be able to reconnect immediately **and** do **not** have any issues with RDP reconnect becoming hung indefinitely, then do not install this mod just for fun._
 
 
 ## Installation
@@ -30,7 +34,7 @@ The current mod prevents `rdpclip.exe` from blocking the RDP reconnect.
 
 The mod needs to inject into the process `winlogon.exe` among other processes. In order for that to be possible, you need to enable injection to `winlogon.exe` under Windhawk's advanced settings. The details for this are as follows:
 
-**This requires Windhawk to be installed, not just run as a portable version.** Portable version of Windhawk will have insufficient privileges to inject into `winlogon.exe`.
+**Windhawk has to be _installed_, not just run as a _portable_ version.** Portable version of Windhawk will have insufficient privileges to inject into `winlogon.exe`.
 
 Before you start installing the current mod, you need to update Windhawk process inclusion list, accessible via `Windhawk -> Settings -> Advanced settings -> More advanced settings -> Process inclusion list`. Add the following row if not yet present there:
 
@@ -43,11 +47,11 @@ After doing that you can proceed installing the mod itself.
 
 ## How it works
 
-The mod works by automatically exiting the `rdpclip.exe` process **and** also restarting RDP-related services when RDP gets disconnected. This way RDP reconnection does not become hung. The RDP related services that will be restarted are `TermService` and `UmRdpService`.
+The mod works by automatically exiting the `rdpclip.exe` process **and** also restarting RDP-related services when RDP gets disconnected. This way RDP reconnection does not become hung. The RDP-related services that will be restarted are `TermService` and `UmRdpService`. Services restart is necessary - terminating only `rdpclip.exe` would not be sufficient.
 
-`rdpclip.exe` is automatically re-started by Windows upon successful RDP reconnect. You do NOT need to manually add rdpclip.exe to Startup programs or anything like that.
+`rdpclip.exe` is automatically re-started by Windows upon successful RDP reconnect. You do NOT need to manually add it to Startup programs or anything like that.
 
-Note that **after disconnection, there will be a brief amount of time during which RDP service is not available**. This is because the RPD service is being automatically restarted by the mod. This means you might not be able to reconnect **immediately**, but only after some seconds have passed. That is a tradeoff of using this mod. _If you consider it important to be able to reconnect immediately **and** do **not** have any issues with RDP reconnect becoming hung, then do not install this mod._
+The mod does not hook any functions. It only creates monitoring threads in relevant processes. `Winlogon.exe` is injected into for the purpose of having sufficient privileges for restarting RDP-related services.
 
 See also: [No Restart Needed: Fixing the dreaded “Please Wait” for Remote Desktop Connections](https://insomnyak.medium.com/no-restart-needed-fixing-the-dreaded-please-wait-for-remote-desktop-connections-3868785cf36)
 
@@ -91,7 +95,7 @@ Note that when you enable nested `mstsc.exe` process auto-termination, then this
 const int nMaxPathLength = MAX_PATH;
 
 DWORD g_sessionId = -1;
-bool g_isWinLogon = true;
+bool g_isWinLogon = false;
 bool g_isRdpClip = true;
 volatile long g_rdpSessionHasBeenActive = 0;
 volatile bool g_exitMstscAndRelatedProcesses = false;
@@ -106,47 +110,303 @@ volatile bool g_exitMonitorThreadWithEvent = false;
 
 
 
-#pragma region Terminal services restart function
+#pragma region Terminal services restart functions
 
-bool RestartTerminalServices() {
+//https://learn.microsoft.com/en-us/windows/win32/services/stopping-a-service
+bool DoStopSvc(SC_HANDLE schSCManager, LPCWSTR szSvcName) {
 
-    //UmRdpService depends on TermService, therefore need to stop and start that one too
-    WCHAR szCmdLine[] = L"cmd.exe /C \"net stop UmRdpService & net stop TermService & net start TermService & net start UmRdpService\"";    
+    SERVICE_STATUS_PROCESS ssp;
+    DWORD dwStartTime = GetTickCount();
+    DWORD dwBytesNeeded;
+    DWORD dwTimeout = 180000; //3-minute time-out
 
-
-    STARTUPINFOW startupInfo = {};
-    startupInfo.cb = { sizeof(STARTUPINFOW) };
-    GetStartupInfoW(&startupInfo);
-
-    PROCESS_INFORMATION processInformation = {};
-
-    Wh_Log(L"Calling CreateProcessW");
-    if (!CreateProcessW(
-        /*lpApplicationName*/NULL,
-        /*lpCommandLine*/szCmdLine,
-        /*lpProcessAttributes*/NULL,
-        /*lpThreadAttributes*/NULL,
-        /*bInheritHandles*/FALSE,
-        /*dwCreationFlags*/CREATE_NEW_CONSOLE,
-        /*lpEnvironment*/NULL,
-        /*lpCurrentDirectory*/NULL,
-        &startupInfo,
-        &processInformation
-    )) {
-        Wh_Log(L"CreateProcessW failed");
+    //Get a handle to the service.
+    SC_HANDLE schService = OpenServiceW(
+        schSCManager,         //SCM database 
+        szSvcName,            //name of service 
+        SERVICE_STOP |
+        SERVICE_QUERY_STATUS |
+        SERVICE_ENUMERATE_DEPENDENTS
+    );
+    if (schService == NULL) {
+        Wh_Log(L"OpenService failed (%d) for %ls", GetLastError(), szSvcName);
         return false;
     }
 
-    //close process and thread handles
-    Wh_Log(L"Calling CloseHandle");
-    CloseHandle(processInformation.hProcess);
-    Wh_Log(L"Calling CloseHandle");
-    CloseHandle(processInformation.hThread);
+    bool result = false;
 
-    return true;
+    //Make sure the service is not already stopped.
+    if (!QueryServiceStatusEx(
+        schService,
+        SC_STATUS_PROCESS_INFO,
+        (LPBYTE)&ssp,
+        sizeof(SERVICE_STATUS_PROCESS),
+        &dwBytesNeeded
+    )) {
+        Wh_Log(L"QueryServiceStatusEx failed (%d) for %ls", GetLastError(), szSvcName);
+        goto stop_cleanup;
+    }
+
+    if (ssp.dwCurrentState == SERVICE_STOPPED) {
+        Wh_Log(L"Service %ls is already stopped.", szSvcName);
+        goto stop_cleanup;
+    }
+
+    //If a stop is pending (before we request it), wait for it.
+    while (ssp.dwCurrentState == SERVICE_STOP_PENDING) {
+
+        Wh_Log(L"Service %ls stop pending...", szSvcName);
+
+        DWORD dwWaitTime = 100;   //use quick polling to restart the services asap
+        Sleep(dwWaitTime);
+
+        if (!QueryServiceStatusEx(
+            schService,
+            SC_STATUS_PROCESS_INFO,
+            (LPBYTE)&ssp,
+            sizeof(SERVICE_STATUS_PROCESS),
+            &dwBytesNeeded
+        )) {
+            Wh_Log(L"QueryServiceStatusEx failed (%d) for %ls", GetLastError(), szSvcName);
+            goto stop_cleanup;
+        }
+
+        if (ssp.dwCurrentState == SERVICE_STOPPED) {    //the stop was requested elsewhere before we did it
+            Wh_Log(L"Service %ls stopped successfully.", szSvcName);
+            goto stop_cleanup;
+        }
+
+        if (GetTickCount() - dwStartTime > dwTimeout) {
+            Wh_Log(L"Service %ls stop timed out.", szSvcName);
+            goto stop_cleanup;
+        }
+    }   //while (ssp.dwCurrentState == SERVICE_STOP_PENDING) {
+
+    //If the service is running, dependencies must be stopped first.
+    //StopDependentServices();    //TODO: detect any other dependent services that are not UmRdpService
+
+    //Send a stop code to the service.
+    if (!ControlService(
+        schService,
+        SERVICE_CONTROL_STOP,
+        (LPSERVICE_STATUS)&ssp
+    )) {
+        Wh_Log(L"ControlService failed (%d for %ls", GetLastError(), szSvcName);
+        goto stop_cleanup;
+    }
+
+    //Wait for the service to stop.
+    while (ssp.dwCurrentState != SERVICE_STOPPED) {
+
+        Sleep(ssp.dwWaitHint);
+        if (!QueryServiceStatusEx(
+            schService,
+            SC_STATUS_PROCESS_INFO,
+            (LPBYTE)&ssp,
+            sizeof(SERVICE_STATUS_PROCESS),
+            &dwBytesNeeded
+        )) {
+            Wh_Log(L"QueryServiceStatusEx failed (%d) for %ls", GetLastError(), szSvcName);
+            goto stop_cleanup;
+        }
+
+        if (ssp.dwCurrentState == SERVICE_STOPPED)
+            break;
+
+        if (GetTickCount() - dwStartTime > dwTimeout) {
+            Wh_Log(L"Wait timed out for %ls", szSvcName);
+            goto stop_cleanup;
+        }
+    }   //while (ssp.dwCurrentState != SERVICE_STOPPED) {
+
+    Wh_Log(L"Service %ls stopped successfully", szSvcName);
+    result = true;
+
+stop_cleanup:
+    CloseServiceHandle(schService);
+    return result;
 }
 
-#pragma endregion Terminal services restart function
+//https://learn.microsoft.com/en-us/windows/win32/services/starting-a-service
+bool DoStartSvc(SC_HANDLE schSCManager, LPCWSTR szSvcName) {
+
+    SERVICE_STATUS_PROCESS ssStatus;
+    DWORD dwOldCheckPoint;
+    DWORD dwStartTickCount;
+    DWORD dwBytesNeeded;
+
+    //Get a handle to the service.
+    SC_HANDLE schService = OpenServiceW(
+        schSCManager,         //SCM database 
+        szSvcName,            //name of service 
+        SERVICE_ALL_ACCESS  //full access 
+    );
+    if (schService == NULL) {
+        Wh_Log(L"OpenService failed (%d) for %ls", GetLastError(), szSvcName);
+        return false;
+    }
+
+    bool result = false;
+
+    //Check the status in case the service is not stopped. 
+    if (!QueryServiceStatusEx(
+        schService,                     // handle to service 
+        SC_STATUS_PROCESS_INFO,         // information level
+        (LPBYTE)&ssStatus,             // address of structure
+        sizeof(SERVICE_STATUS_PROCESS), // size of structure
+        &dwBytesNeeded
+    )) {             // size needed if buffer is too small
+        Wh_Log(L"QueryServiceStatusEx failed (%d) for %ls", GetLastError(), szSvcName);
+        goto start_cleanup;
+    }
+
+    //Check if the service is already running.
+    if (
+        ssStatus.dwCurrentState != SERVICE_STOPPED 
+        && ssStatus.dwCurrentState != SERVICE_STOP_PENDING
+    ) {
+        Wh_Log(L"Cannot start the service %ls because it is already running", szSvcName);
+        goto start_cleanup;
+    }
+
+    //Save the tick count and initial checkpoint.
+    dwStartTickCount = GetTickCount();
+    dwOldCheckPoint = ssStatus.dwCheckPoint;
+
+    //Wait for the service to stop before attempting to start it.
+    while (ssStatus.dwCurrentState == SERVICE_STOP_PENDING) {
+
+        DWORD dwWaitTime = 100;   //use quick polling to restart the services asap
+        Sleep(dwWaitTime);
+
+        // Check the status until the service is no longer stop pending. 
+        if (!QueryServiceStatusEx(
+            schService,                     // handle to service 
+            SC_STATUS_PROCESS_INFO,         // information level
+            (LPBYTE)&ssStatus,             // address of structure
+            sizeof(SERVICE_STATUS_PROCESS), // size of structure
+            &dwBytesNeeded              // size needed if buffer is too small
+        )) {
+            Wh_Log(L"QueryServiceStatusEx failed (%d)", GetLastError());
+            goto start_cleanup;
+        }
+
+        if (ssStatus.dwCheckPoint > dwOldCheckPoint) {
+            // Continue to wait and check.
+            dwStartTickCount = GetTickCount();
+            dwOldCheckPoint = ssStatus.dwCheckPoint;
+        }
+        else if (GetTickCount() - dwStartTickCount > ssStatus.dwWaitHint) {
+            Wh_Log(L"Timeout waiting for service %ls to stop", szSvcName);
+            goto start_cleanup;
+        }
+    }   //while (ssStatus.dwCurrentState == SERVICE_STOP_PENDING) {
+
+    //Attempt to start the service.
+    if (!StartService(
+        schService,  // handle to service 
+        0,           // number of arguments 
+        NULL      // no arguments 
+    )) {
+        Wh_Log(L"StartService failed (%d) for %ls", GetLastError(), szSvcName);
+        goto start_cleanup;
+    }
+    else {
+        Wh_Log(L"Service %ls start pending...", szSvcName);
+    }
+
+    //Check the status until the service is no longer start pending.
+    if (!QueryServiceStatusEx(
+        schService,                     // handle to service 
+        SC_STATUS_PROCESS_INFO,         // info level
+        (LPBYTE)&ssStatus,             // address of structure
+        sizeof(SERVICE_STATUS_PROCESS), // size of structure
+        &dwBytesNeeded              // if buffer too small
+    )) {
+        Wh_Log(L"QueryServiceStatusEx failed (%d) for %ls", GetLastError(), szSvcName);
+        goto start_cleanup;
+    }
+
+    //Save the tick count and initial checkpoint.
+    dwStartTickCount = GetTickCount();
+    dwOldCheckPoint = ssStatus.dwCheckPoint;
+
+    while (ssStatus.dwCurrentState == SERVICE_START_PENDING) {
+
+        DWORD dwWaitTime = 100;   //use quick polling to restart the services asap
+        Sleep(dwWaitTime);
+
+        // Check the status again. 
+        if (!QueryServiceStatusEx(
+            schService,             // handle to service 
+            SC_STATUS_PROCESS_INFO, // info level
+            (LPBYTE)&ssStatus,             // address of structure
+            sizeof(SERVICE_STATUS_PROCESS), // size of structure
+            &dwBytesNeeded              // if buffer too small
+        )) {
+            Wh_Log(L"QueryServiceStatusEx failed (%d) for %ls", GetLastError(), szSvcName);
+            break;
+        }
+
+        if (ssStatus.dwCheckPoint > dwOldCheckPoint) {
+            //Continue to wait and check.
+            dwStartTickCount = GetTickCount();
+            dwOldCheckPoint = ssStatus.dwCheckPoint;
+        }
+        else if (GetTickCount() - dwStartTickCount > ssStatus.dwWaitHint) {
+            //No progress made within the wait hint.
+            break;
+        }
+    }   //while (ssStatus.dwCurrentState == SERVICE_START_PENDING) {
+
+    //Determine whether the service is running.
+    if (ssStatus.dwCurrentState == SERVICE_RUNNING) {
+        Wh_Log(L"Service %ls started successfully.", szSvcName);
+        result = true;
+    }
+    else {
+        Wh_Log(L"Service %ls not started. ", szSvcName);
+        Wh_Log(L"  Current State: %d", ssStatus.dwCurrentState);
+        Wh_Log(L"  Exit Code: %d", ssStatus.dwWin32ExitCode);
+        Wh_Log(L"  Check Point: %d", ssStatus.dwCheckPoint);
+        Wh_Log(L"  Wait Hint: %d", ssStatus.dwWaitHint);
+    }
+
+start_cleanup:
+    CloseServiceHandle(schService);
+    return result;
+}
+
+bool RestartTerminalServices() {
+
+    // Get a handle to the SCM database. 
+    SC_HANDLE schSCManager = OpenSCManagerW(
+        NULL,                    // local computer
+        NULL,                    // ServicesActive database 
+        SC_MANAGER_ALL_ACCESS  // full access rights 
+    );
+    if (NULL == schSCManager) {
+        Wh_Log(L"OpenSCManager failed (%d)", GetLastError());
+        return false;
+    }
+    
+
+    bool result = false;
+    /*bool umRdpServiceStopSuccess = */DoStopSvc(schSCManager, L"UmRdpService");
+    bool termServiceStopSuccess = DoStopSvc(schSCManager, L"TermService");
+    if (termServiceStopSuccess)
+        result = DoStartSvc(schSCManager, L"TermService");
+    //comment-out: this service restarts itself when needed, do not spend time here and return to monitoring instead
+    //if (umRdpServiceStopSuccess)
+    //    DoStartSvc(schSCManager, L"UmRdpService");
+
+
+    CloseServiceHandle(schSCManager);
+
+    return result;
+}
+
+#pragma endregion Terminal services restart functions
 
 
 
