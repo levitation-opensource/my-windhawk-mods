@@ -7,6 +7,7 @@
 // @github          https://github.com/levitation
 // @homepage        https://www.simplify.ee/
 // @compilerOptions -lkernel32 -lwtsapi32
+// @include         winlogon.exe
 // @include         rdpclip.exe
 // @include         mstsc.exe
 // @include         vmconnect.exe
@@ -22,14 +23,31 @@ RDP users sometimes encounter issues with an endless "Please Wait" message durin
 
 The current mod prevents `rdpclip.exe` from blocking the RDP reconnect. 
 
+
+## Installation
+
 **Install the mod at the RDP _SERVER_ side.**
+
+The mod needs to inject into the process `winlogon.exe` among other processes. In order for that to be possible, you need to enable injection to `winlogon.exe` under Windhawk's advanced settings. The details for this are as follows:
+
+**This requires Windhawk to be installed, not just run as a portable version.** Portable version of Windhawk will have insufficient privileges to inject into `winlogon.exe`.
+
+Before you start installing the current mod, you need to update Windhawk process inclusion list, accessible via `Windhawk -> Settings -> Advanced settings -> More advanced settings -> Process inclusion list`. Add the following row if not yet present there:
+
+> `winlogon.exe`
+
+Then click `"Save and restart Windhawk"` button.
+
+After doing that you can proceed installing the mod itself.
 
 
 ## How it works
 
-The mod works by automatically exiting the `rdpclip.exe` process when RDP gets disconnected. This way RDP reconnection does not become hung. 
+The mod works by automatically exiting the `rdpclip.exe` process **and** also restarting RDP-related services when RDP gets disconnected. This way RDP reconnection does not become hung. The RDP related services that will be restarted are `TermService` and `UmRdpService`.
 
 `rdpclip.exe` is automatically re-started by Windows upon successful RDP reconnect. You do NOT need to manually add rdpclip.exe to Startup programs or anything like that.
+
+Note that **after disconnection, there will be a brief amount of time during which RDP service is not available**. This is because the RPD service is being automatically restarted by the mod. This means you might not be able to reconnect **immediately**, but only after some seconds have passed. That is a tradeoff of using this mod. _If you consider it important to be able to reconnect immediately **and** do **not** have any issues with RDP reconnect becoming hung, then do not install this mod._
 
 See also: [No Restart Needed: Fixing the dreaded “Please Wait” for Remote Desktop Connections](https://insomnyak.medium.com/no-restart-needed-fixing-the-dreaded-please-wait-for-remote-desktop-connections-3868785cf36)
 
@@ -56,6 +74,7 @@ Note that when you enable nested `mstsc.exe` process auto-termination, then this
 
 #include <windowsx.h>
 #include <wtsapi32.h>
+#include <intrin.h>
 
 
 #ifndef WH_MOD
@@ -71,8 +90,11 @@ Note that when you enable nested `mstsc.exe` process auto-termination, then this
 
 const int nMaxPathLength = MAX_PATH;
 
+DWORD g_sessionId = -1;
+bool g_isWinLogon = true;
 bool g_isRdpClip = true;
-bool g_exitMstscAndRelatedProcesses = false;
+volatile long g_rdpSessionHasBeenActive = 0;
+volatile bool g_exitMstscAndRelatedProcesses = false;
 
 HANDLE g_rdpMonitorThreadWithPolling = NULL;
 HANDLE g_rdpMonitorThreadWithEvent = NULL;
@@ -81,6 +103,50 @@ HANDLE g_rdpMonitorThreadWithPollingStopSignal = NULL;
 volatile bool g_exitMonitorThreadWithEvent = false;
 
 #pragma endregion Global variables
+
+
+
+#pragma region Terminal services restart function
+
+bool RestartTerminalServices() {
+
+    //UmRdpService depends on TermService, therefore need to stop and start that one too
+    WCHAR szCmdLine[] = L"cmd.exe /C \"net stop UmRdpService & net stop TermService & net start TermService & net start UmRdpService\"";    
+
+
+    STARTUPINFOW startupInfo = {};
+    startupInfo.cb = { sizeof(STARTUPINFOW) };
+    GetStartupInfoW(&startupInfo);
+
+    PROCESS_INFORMATION processInformation = {};
+
+    Wh_Log(L"Calling CreateProcessW");
+    if (!CreateProcessW(
+        /*lpApplicationName*/NULL,
+        /*lpCommandLine*/szCmdLine,
+        /*lpProcessAttributes*/NULL,
+        /*lpThreadAttributes*/NULL,
+        /*bInheritHandles*/FALSE,
+        /*dwCreationFlags*/CREATE_NEW_CONSOLE,
+        /*lpEnvironment*/NULL,
+        /*lpCurrentDirectory*/NULL,
+        &startupInfo,
+        &processInformation
+    )) {
+        Wh_Log(L"CreateProcessW failed");
+        return false;
+    }
+
+    //close process and thread handles
+    Wh_Log(L"Calling CloseHandle");
+    CloseHandle(processInformation.hProcess);
+    Wh_Log(L"Calling CloseHandle");
+    CloseHandle(processInformation.hThread);
+
+    return true;
+}
+
+#pragma endregion Terminal services restart function
 
 
 
@@ -98,6 +164,8 @@ DWORD WINAPI RDPMonitorThreadFuncWithPolling(LPVOID param) {
     while (true) {
 
         bool sessionDisconnected = false;
+        bool rdpSessionIsActive = false;
+
         WTS_CONNECTSTATE_CLASS* pConnectState = NULL;
         DWORD bytesReturned;
         if (
@@ -112,7 +180,9 @@ DWORD WINAPI RDPMonitorThreadFuncWithPolling(LPVOID param) {
             && bytesReturned == sizeof(WTS_CONNECTSTATE_CLASS)
         ) {
             sessionDisconnected = (*pConnectState == WTSDisconnected);
-            Wh_Log(L"Session state: %u, disconnected: %ls", (int)(*pConnectState), sessionDisconnected ? L"Yes" : L"No");
+            rdpSessionIsActive = (*pConnectState == WTSActive) && (g_sessionId != WTSGetActiveConsoleSessionId());  //NB! ignore console session active state
+
+            Wh_Log(L"Session state: %u, disconnected: %ls, rdpActive: %ls", (int)(*pConnectState), sessionDisconnected ? L"Yes" : L"No", rdpSessionIsActive ? L"Yes" : L"No");
         }
         else {
             Wh_Log(L"WTSQuerySessionInformationW failed");
@@ -121,9 +191,21 @@ DWORD WINAPI RDPMonitorThreadFuncWithPolling(LPVOID param) {
         if (pConnectState)
             WTSFreeMemory(pConnectState);
 
-        if (sessionDisconnected) {
-            ExitProcess(0);
-            return FALSE;
+        if (
+            sessionDisconnected
+            && g_rdpSessionHasBeenActive != 0
+            && InterlockedExchange(&g_rdpSessionHasBeenActive, 0) != 0  //allow only one thread to signal disconnect
+        ) {
+            if (g_isWinLogon) {
+                RestartTerminalServices();
+            }
+            else {
+                ExitProcess(0);
+                return FALSE;
+            }            
+        }
+        else if (rdpSessionIsActive) {
+            g_rdpSessionHasBeenActive = 1;
         }
 
 
@@ -143,18 +225,62 @@ DWORD WINAPI RDPMonitorThreadFuncWithEvent(LPVOID param) {
     while (!g_exitMonitorThreadWithEvent) {
 
         bool sessionDisconnected = false;
+        bool rdpSessionIsActive = false;
         DWORD eventFlags;
         if (WTSWaitSystemEvent(
             WTS_CURRENT_SERVER_HANDLE,
-            WTS_EVENT_DISCONNECT,
+            WTS_EVENT_DISCONNECT | WTS_EVENT_STATECHANGE,
             &eventFlags
         )) {
             sessionDisconnected = (eventFlags & WTS_EVENT_DISCONNECT) != 0;
-            Wh_Log(L"Session eventFlags: 0x%X, disconnected: %ls", eventFlags, sessionDisconnected ? L"Yes" : L"No");
+            
+            bool stateChange = (eventFlags & WTS_EVENT_STATECHANGE) != 0;
+            if (
+                !sessionDisconnected
+                && stateChange
+                && g_sessionId != WTSGetActiveConsoleSessionId()    //NB! ignore console session active state
+            ) {
+                //need to query WTSQuerySessionInformationW since WTSWaitSystemEvent does not return detailed connect state directly
 
-            if (sessionDisconnected) {
-                ExitProcess(0);
-                return FALSE;
+                WTS_CONNECTSTATE_CLASS* pConnectState = NULL;
+                DWORD bytesReturned;
+                if (
+                    WTSQuerySessionInformationW(
+                        WTS_CURRENT_SERVER_HANDLE,
+                        WTS_CURRENT_SESSION,
+                        WTSConnectState,
+                        (LPWSTR*)&pConnectState,
+                        &bytesReturned
+                    )
+                    && pConnectState
+                    && bytesReturned == sizeof(WTS_CONNECTSTATE_CLASS)
+                ) {
+                    rdpSessionIsActive = (*pConnectState == WTSActive);  
+
+                    Wh_Log(L"Session state: %u, disconnected: %ls, rdpActive: %ls", (int)(*pConnectState), sessionDisconnected ? L"Yes" : L"No", rdpSessionIsActive ? L"Yes" : L"No");
+                }
+                else {
+                    Wh_Log(L"WTSQuerySessionInformationW failed");
+                }
+            }
+
+            Wh_Log(L"Session eventFlags: 0x%X, disconnected: %ls, rdpActive: %ls", eventFlags, sessionDisconnected ? L"Yes" : L"No", rdpSessionIsActive ? L"Yes" : L"No");
+
+            if (
+                sessionDisconnected
+                && g_rdpSessionHasBeenActive != 0
+                && InterlockedExchange(&g_rdpSessionHasBeenActive, 0) != 0  //allow only one thread to signal disconnect
+            ) {
+                if (g_isWinLogon) {
+                    RestartTerminalServices();
+                }
+                else {
+                    ExitProcess(0);
+                    return FALSE;
+                }                
+            }
+            else if (rdpSessionIsActive) {
+                g_rdpSessionHasBeenActive = 1;
             }
         }
         else {
@@ -281,23 +407,50 @@ void DetectRdpClipProcess() {
     WCHAR programPath[nMaxPathLength + 1];
     DWORD dwSize = ARRAYSIZE(programPath);
     if (!QueryFullProcessImageNameW(GetCurrentProcess(), 0, programPath, &dwSize)) {
-        *programPath = L'\0';
+        *programPath = L'\0';   //then assume it is mstsc.exe-like process
     }
 
     size_t programPathLen = wcslen(programPath);
 
-    PCWSTR rdpClipProcessName = L"\\rdpclip.exe";
-    size_t rdpClipNameLen = wcslen(rdpClipProcessName);
+
+    PCWSTR winLogonProcessName = L"\\winlogon.exe";
+    size_t winLogonNameLen = wcslen(winLogonProcessName);
     if (
-        programPathLen > rdpClipNameLen
-        && wcsicmp(&programPath[programPathLen - rdpClipNameLen], rdpClipProcessName) == 0     //match end of path (this includes file name)
+        programPathLen > winLogonNameLen
+        && wcsicmp(&programPath[programPathLen - winLogonNameLen], winLogonProcessName) == 0     //match end of path (this includes file name)
     ) {
-        Wh_Log(L"Running in rdpclip.exe process");
-        g_isRdpClip = true;
+        Wh_Log(L"Running in winlogon.exe process");
+        g_isWinLogon = true;
     }
     else {
-        Wh_Log(L"Running in mstsc.exe or related process");
-        g_isRdpClip = false;
+        g_isWinLogon = false;
+
+        PCWSTR rdpClipProcessName = L"\\rdpclip.exe";
+        size_t rdpClipNameLen = wcslen(rdpClipProcessName);
+        if (
+            programPathLen > rdpClipNameLen
+            && wcsicmp(&programPath[programPathLen - rdpClipNameLen], rdpClipProcessName) == 0     //match end of path (this includes file name)
+        ) {
+            Wh_Log(L"Running in rdpclip.exe process");
+            g_isRdpClip = true;
+        }
+        else {
+            Wh_Log(L"Running in mstsc.exe or related process");
+            g_isRdpClip = false;
+        }
+    }
+}
+
+bool InitSessionIdVar() {
+
+    DWORD sessionId;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &sessionId)) {
+        Wh_Log(L"ProcessIdToSessionId failed");
+        return false;
+    }
+    else {
+        g_sessionId = sessionId;
+        return true;
     }
 }
 
@@ -314,8 +467,10 @@ void Wh_ModSettingsChanged() {
 
     LoadSettings();
 
-    if (!g_isRdpClip) {     //for rdpclip.exe the monitoring thread is started during Wh_ModInit() and then runs permanently
-
+    if (     //for rdpclip.exe and winlogon.exe the monitoring thread is started during Wh_ModInit() and then runs permanently
+        !g_isRdpClip 
+        && !g_isWinLogon
+    ) {
         if (g_exitMstscAndRelatedProcesses) {
 
             StartMonitoringThreads();
@@ -332,10 +487,14 @@ BOOL Wh_ModInit() {
 
     LoadSettings();
 
+    if (!InitSessionIdVar())
+        return FALSE;
+
     DetectRdpClipProcess();
 
     if (
         g_isRdpClip
+        || g_isWinLogon
         || g_exitMstscAndRelatedProcesses
     ) {
         return StartMonitoringThreads();
